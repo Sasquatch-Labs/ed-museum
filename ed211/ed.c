@@ -9,9 +9,14 @@ static char sccsid[] = "@(#)ed.c	4.5.1.1 (Berkeley) 8/12/86";
 
 #include <signal.h>
 #include <sgtty.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #undef CEOF
 #include <setjmp.h>
-#define	NULL	0
 #define	FNSIZE	64
 #define	LBSIZE	512
 #define	ESIZE	128
@@ -57,8 +62,8 @@ int	ninbuf;
 int	io;
 int	pflag;
 long	lseek();
-int	(*oldhup)();
-int	(*oldquit)();
+void (*oldhup)(int);
+void (*oldquit)(int);
 int	vflag	= 1;
 
 
@@ -67,7 +72,7 @@ int	col;
 char	*globp;
 int	tfile	= -1;
 int	tline;
-char	*tfname;
+char	tfname[] = "/tmp/eXXXXXX";
 char	*loc1;
 char	*loc2;
 char	*locs;
@@ -89,371 +94,206 @@ int	fchange;
 int	wrapp;
 unsigned nlall = 128;
 
-int	*address();
+int	*address(void);
+void error(char *s);
+void putfile(void);
+void quit(void);
+void commands(void);
+
 char	*getline();
 char	*getblock();
 char	*place();
-char	*mktemp();
-char	*malloc();
-char	*realloc();
 jmp_buf	savej;
 
-main(argc, argv)
-char **argv;
+char
+getchr(void)
 {
-	register char *p1, *p2;
-	extern int onintr(), quit(), onhup();
-	int (*oldintr)();
-
-	oldquit = signal(SIGQUIT, SIG_IGN);
-	oldhup = signal(SIGHUP, SIG_IGN);
-	oldintr = signal(SIGINT, SIG_IGN);
-	if ((int)signal(SIGTERM, SIG_IGN) == 0)
-		signal(SIGTERM, quit);
-	argv++;
-	while (argc > 1 && **argv=='-') {
-		switch((*argv)[1]) {
-
-		case '\0':
-			vflag = 0;
-			break;
-
-		case 'q':
-			signal(SIGQUIT, SIG_DFL);
-			vflag = 1;
-			break;
-
-		}
-		argv++;
-		argc--;
+	char c;
+	if (lastc=peekc) {
+		peekc = 0;
+		return(lastc);
 	}
-
-	if (argc>1) {
-		p1 = *argv;
-		p2 = savedfile;
-		while (*p2++ = *p1++)
-			;
-		globp = "r";
+	if (globp) {
+		if ((lastc = *globp++) != 0)
+			return(lastc);
+		globp = 0;
+		return(EOF);
 	}
-	zero = (int *)malloc(nlall*sizeof(int));
-	tfname = mktemp("/tmp/eXXXXX");
-	init();
-	if (((int)oldintr&01) == 0)
-		signal(SIGINT, onintr);
-	if (((int)oldhup&01) == 0)
-		signal(SIGHUP, onhup);
-	setjmp(savej);
-	commands();
-	quit();
+	if (read(0, &c, 1) <= 0)
+		return(lastc = EOF);
+	lastc = c&0177;
+	return(lastc);
 }
 
-commands()
+char	line[70];
+char	*linp	= line;
+
+void
+putchr(int ac)
 {
-	int getfile(), gettty();
-	register *a1, c;
+	char *lp;
+	int c;
 
-	for (;;) {
-	if (pflag) {
-		pflag = 0;
-		addr1 = addr2 = dot;
-		goto print;
+	lp = linp;
+	c = ac;
+	if (listf) {
+		col++;
+		if (col >= 72) {
+			col = 0;
+			*lp++ = '\\';
+			*lp++ = '\n';
+		}
+		if (c=='\t') {
+			c = '>';
+			goto esc;
+		}
+		if (c=='\b') {
+			c = '<';
+		esc:
+			*lp++ = '-';
+			*lp++ = '\b';
+			*lp++ = c;
+			goto out;
+		}
+		if (c<' ' && c!= '\n') {
+			*lp++ = '\\';
+			*lp++ = (c>>3)+'0';
+			*lp++ = (c&07)+'0';
+			col += 2;
+			goto out;
+		}
 	}
-	addr1 = 0;
-	addr2 = 0;
-	do {
-		addr1 = addr2;
-		if ((a1 = address())==0) {
-			c = getchr();
-			break;
-		}
-		addr2 = a1;
-		if ((c=getchr()) == ';') {
-			c = ',';
-			dot = a1;
-		}
-	} while (c==',');
-	if (addr1==0)
-		addr1 = addr2;
-	switch(c) {
-
-	case 'a':
-		setdot();
-		newline();
-		append(gettty, addr2);
-		continue;
-
-	case 'c':
-		delete();
-		append(gettty, addr1-1);
-		continue;
-
-	case 'd':
-		delete();
-		continue;
-
-	case 'E':
-		fchange = 0;
-		c = 'e';
-	case 'e':
-		setnoaddr();
-		if (vflag && fchange) {
-			fchange = 0;
-			error(Q);
-		}
-		filename(c);
-		init();
-		addr2 = zero;
-		goto caseread;
-
-	case 'f':
-		setnoaddr();
-		filename(c);
-		puts(savedfile);
-		continue;
-
-	case 'g':
-		global(1);
-		continue;
-
-	case 'i':
-		setdot();
-		nonzero();
-		newline();
-		append(gettty, addr2-1);
-		continue;
-
-
-	case 'j':
-		if (addr2==0) {
-			addr1 = dot;
-			addr2 = dot+1;
-		}
-		setdot();
-		newline();
-		nonzero();
-		join();
-		continue;
-
-	case 'k':
-		if ((c = getchr()) < 'a' || c > 'z')
-			error(Q);
-		newline();
-		setdot();
-		nonzero();
-		names[c-'a'] = *addr2 & ~01;
-		anymarks |= 01;
-		continue;
-
-	case 'm':
-		move(0);
-		continue;
-
-	case '\n':
-		if (addr2==0)
-			addr2 = dot+1;
-		addr1 = addr2;
-		goto print;
-
-	case 'l':
-		listf++;
-	case 'p':
-	case 'P':
-		newline();
-	print:
-		setdot();
-		nonzero();
-		a1 = addr1;
-		do {
-			puts(getline(*a1++));
-		} while (a1 <= addr2);
-		dot = addr2;
-		listf = 0;
-		continue;
-
-	case 'Q':
-		fchange = 0;
-	case 'q':
-		setnoaddr();
-		newline();
-		quit();
-
-	case 'r':
-		filename(c);
-	caseread:
-		if ((io = open(file, 0)) < 0) {
-			lastc = '\n';
-			error(file);
-		}
-		setall();
-		ninbuf = 0;
-		c = zero != dol;
-		append(getfile, addr2);
-		exfile();
-		fchange = c;
-		continue;
-
-	case 's':
-		setdot();
-		nonzero();
-		substitute(globp!=0);
-		continue;
-
-	case 't':
-		move(1);
-		continue;
-
-	case 'u':
-		setdot();
-		nonzero();
-		newline();
-		if ((*addr2&~01) != subnewa)
-			error(Q);
-		*addr2 = subolda;
-		dot = addr2;
-		continue;
-
-	case 'v':
-		global(0);
-		continue;
-
-	case 'W':
-		wrapp++;
-	case 'w':
-		setall();
-		nonzero();
-		filename(c);
-		if(!wrapp ||
-		  ((io = open(file,1)) == -1) ||
-		  ((lseek(io, 0L, 2)) == -1))
-			if ((io = creat(file, 0666)) < 0)
-				error(file);
-		wrapp = 0;
-		putfile();
-		exfile();
-		if (addr1==zero+1 && addr2==dol)
-			fchange = 0;
-		continue;
-
-
-
-	case '=':
-		setall();
-		newline();
-		count = (addr2-zero)&077777;
-		putd();
-		putchr('\n');
-		continue;
-
-	case '!':
-		callunix();
-		continue;
-
-	case EOF:
+	*lp++ = c;
+out:
+	if(c == '\n' || lp >= &line[64]) {
+		linp = line;
+		write(1, line, lp-line);
 		return;
-
 	}
-	error(Q);
-	}
+	linp = lp;
 }
 
-int *
-address()
+void
+putd(void)
 {
-	register *a1, minus, c;
-	int n, relerr;
+	int r;
 
-	minus = 0;
-	a1 = 0;
-	for (;;) {
-		c = getchr();
-		if ('0'<=c && c<='9') {
-			n = 0;
-			do {
-				n *= 10;
-				n += c - '0';
-			} while ((c = getchr())>='0' && c<='9');
-			peekc = c;
-			if (a1==0)
-				a1 = zero;
-			if (minus<0)
-				n = -n;
-			a1 += n;
-			minus = 0;
-			continue;
-		}
-		relerr = 0;
-		if (a1 || minus)
-			relerr++;
-		switch(c) {
-		case ' ':
-		case '\t':
-			continue;
-	
-		case '+':
-			minus++;
-			if (a1==0)
-				a1 = dot;
-			continue;
+	r = count%10;
+	count /= 10;
+	if (count)
+		putd();
+	putchr(r + '0');
+}
 
-		case '-':
-		case '^':
-			minus--;
-			if (a1==0)
-				a1 = dot;
-			continue;
-	
-		case '?':
-		case '/':
-			compile(c);
-			a1 = dot;
-			for (;;) {
-				if (c=='/') {
-					a1++;
-					if (a1 > dol)
-						a1 = zero;
-				} else {
-					a1--;
-					if (a1 < zero)
-						a1 = dol;
-				}
-				if (execute(0, a1))
-					break;
-				if (a1==dot)
-					error(Q);
-			}
-			break;
-	
-		case '$':
-			a1 = dol;
-			break;
-	
-		case '.':
-			a1 = dot;
-			break;
+void
+edputs(char *sp)
+{
+	col = 0;
+	while (*sp)
+		putchr(*sp++);
+	putchr('\n');
+}
 
-		case '\'':
-			if ((c = getchr()) < 'a' || c > 'z')
-				error(Q);
-			for (a1=zero; a1<=dol; a1++)
-				if (names[c-'a'] == (*a1 & ~01))
-					break;
-			break;
-	
-		default:
-			peekc = c;
-			if (a1==0)
-				return(0);
-			a1 += minus;
-			if (a1<zero || a1>dol)
-				error(Q);
-			return(a1);
-		}
-		if (relerr)
-			error(Q);
+void
+blkio(int b, char *buf, ssize_t (*iofcn)(int, void *, size_t))
+{
+	lseek(tfile, (long)b<<9, 0);
+	if ((*iofcn)(tfile, buf, 512) != 512) {
+		error(T);
 	}
 }
 
-setdot()
+ssize_t
+edwrite(int fd, void *buf, size_t n)
+{
+	return write(fd, buf, n);
+}
+
+char *
+getblock(int atl, int iof)
+{
+	int bno, off;
+	char *p1, *p2;
+	int n;
+
+	bno = (atl>>8)&0377;
+	off = (atl<<1)&0774;
+	if (bno >= 255) {
+		lastc = '\n';
+		error(T);
+	}
+	nleft = 512 - off;
+	if (bno==iblock) {
+		ichanged |= iof;
+		return(ibuff+off);
+	}
+	if (bno==oblock)
+		return(obuff+off);
+	if (iof==READ) {
+		if (ichanged) {
+			blkio(iblock, ibuff, edwrite);
+		}
+		ichanged = 0;
+		iblock = bno;
+		blkio(bno, ibuff, read);
+		return(ibuff+off);
+	}
+	if (oblock>=0) {
+			blkio(oblock, obuff, edwrite);
+	}
+	oblock = bno;
+	return(obuff+off);
+}
+
+char *
+getline(int tl)
+{
+	register char *bp, *lp;
+	int nl;
+
+	lp = linebuf;
+	bp = getblock(tl, READ);
+	nl = nleft;
+	tl &= ~0377;
+	while (*lp++ = *bp++)
+		if (--nl == 0) {
+			bp = getblock(tl+=0400, READ);
+			nl = nleft;
+		}
+	return(linebuf);
+}
+
+int
+putline(void)
+{
+	char *bp, *lp;
+	int nl;
+	int tl;
+
+	fchange = 1;
+	lp = linebuf;
+	tl = tline;
+	bp = getblock(tl, WRITE);
+	nl = nleft;
+	tl &= ~0377;
+	while (*bp = *lp++) {
+		if (*bp++ == '\n') {
+			*--bp = 0;
+			linebp = lp;
+			break;
+		}
+		if (--nl == 0) {
+			bp = getblock(tl+=0400, WRITE);
+			nl = nleft;
+		}
+	}
+	nl = tline;
+	tline += (((lp-linebuf)+03)>>1)&077776;
+	return(nl);
+}
+
+void
+setdot(void)
 {
 	if (addr2 == 0)
 		addr1 = addr2 = dot;
@@ -461,7 +301,8 @@ setdot()
 		error(Q);
 }
 
-setall()
+void
+setall(void)
 {
 	if (addr2==0) {
 		addr1 = zero+1;
@@ -472,21 +313,24 @@ setall()
 	setdot();
 }
 
-setnoaddr()
+void
+setnoaddr(void)
 {
 	if (addr2)
 		error(Q);
 }
 
-nonzero()
+void
+nonzero(void)
 {
 	if (addr1<=zero || addr2>dol)
 		error(Q);
 }
 
-newline()
+void
+newline(void)
 {
-	register c;
+	int c;
 
 	if ((c = getchr()) == '\n')
 		return;
@@ -500,10 +344,11 @@ newline()
 	error(Q);
 }
 
-filename(comm)
+void
+filename(char comm)
 {
 	register char *p1, *p2;
-	register c;
+	char c;
 
 	count = 0;
 	c = getchr();
@@ -537,7 +382,8 @@ filename(comm)
 	}
 }
 
-exfile()
+void
+exfile(void)
 {
 	close(io);
 	io = -1;
@@ -547,7 +393,8 @@ exfile()
 	}
 }
 
-onintr()
+void
+onintr(int ign)
 {
 	signal(SIGINT, onintr);
 	putchr('\n');
@@ -555,7 +402,8 @@ onintr()
 	error(Q);
 }
 
-onhup()
+void
+onhup(int ign)
 {
 	signal(SIGINT, SIG_IGN);
 	signal(SIGHUP, SIG_IGN);
@@ -570,15 +418,15 @@ onhup()
 	quit();
 }
 
-error(s)
-char *s;
+void
+error(char *s)
 {
-	register c;
+	int c;
 
 	wrapp = 0;
 	listf = 0;
 	putchr('?');
-	puts(s);
+	edputs(s);
 	count = 0;
 	lseek(0, (long)0, 2);
 	pflag = 0;
@@ -596,30 +444,12 @@ char *s;
 	longjmp(savej, 1);
 }
 
-getchr()
+int
+gettty(void)
 {
-	char c;
-	if (lastc=peekc) {
-		peekc = 0;
-		return(lastc);
-	}
-	if (globp) {
-		if ((lastc = *globp++) != 0)
-			return(lastc);
-		globp = 0;
-		return(EOF);
-	}
-	if (read(0, &c, 1) <= 0)
-		return(lastc = EOF);
-	lastc = c&0177;
-	return(lastc);
-}
-
-gettty()
-{
-	register c;
-	register char *gf;
-	register char *p;
+	int c;
+	char *gf;
+	char *p;
 
 	p = linebuf;
 	gf = globp;
@@ -641,10 +471,11 @@ gettty()
 	return(0);
 }
 
-getfile()
+int
+getfile(void)
 {
-	register c;
-	register char *lp, *fp;
+	int c;
+	char *lp, *fp;
 
 	lp = linebuf;
 	fp = nextip;
@@ -675,11 +506,12 @@ getfile()
 	return(0);
 }
 
-putfile()
+void
+putfile(void)
 {
 	int *a1, n;
-	register char *fp, *lp;
-	register nib;
+	char *fp, *lp;
+	int nib;
 
 	nib = 512;
 	fp = genbuf;
@@ -690,7 +522,7 @@ putfile()
 			if (--nib < 0) {
 				n = fp-genbuf;
 				if(write(io, genbuf, n) != n) {
-					puts(WRERR);
+					edputs(WRERR);
 					error(Q);
 				}
 				nib = 511;
@@ -705,16 +537,15 @@ putfile()
 	} while (a1 <= addr2);
 	n = fp-genbuf;
 	if(write(io, genbuf, n) != n) {
-		puts(WRERR);
+		edputs(WRERR);
 		error(Q);
 	}
 }
 
-append(f, a)
-int *a;
-int (*f)();
+int
+append(int (*f)(), int *a)
 {
-	register *a1, *a2, *rdot;
+	int *a1, *a2, *rdot;
 	int nline, tl;
 
 	nline = 0;
@@ -743,9 +574,11 @@ int (*f)();
 	return(nline);
 }
 
-callunix()
+void
+callunix(void)
 {
-	register (*savint)(), pid, rpid;
+	void (*savint)(int);
+    int pid, rpid;
 	int retcode;
 
 	setnoaddr();
@@ -759,10 +592,11 @@ callunix()
 	while ((rpid = wait(&retcode)) != pid && rpid != -1)
 		;
 	signal(SIGINT, savint);
-	puts("!");
+	edputs("!");
 }
 
-quit()
+void
+quit(void)
 {
 	if (vflag && fchange && dol!=zero) {
 		fchange = 0;
@@ -772,18 +606,16 @@ quit()
 	exit(0);
 }
 
-delete()
+void
+shquit(int ign)
 {
-	setdot();
-	newline();
-	nonzero();
-	rdelete(addr1, addr2);
+	quit();
 }
 
-rdelete(ad1, ad2)
-int *ad1, *ad2;
+void
+rdelete(int *ad1, int *ad2)
 {
-	register *a1, *a2, *a3;
+	int *a1, *a2, *a3;
 
 	a1 = ad1;
 	a2 = ad2+1;
@@ -799,9 +631,19 @@ int *ad1, *ad2;
 	fchange = 1;
 }
 
-gdelete()
+void
+delete(void)
 {
-	register *a1, *a2, *a3;
+	setdot();
+	newline();
+	nonzero();
+	rdelete(addr1, addr2);
+}
+
+void
+gdelete(void)
+{
+	int *a1, *a2, *a3;
 
 	a3 = dol;
 	for (a1=zero+1; (*a1&01)==0; a1++)
@@ -820,104 +662,11 @@ gdelete()
 	fchange = 1;
 }
 
-char *
-getline(tl)
+void
+init(void)
 {
-	register char *bp, *lp;
-	register nl;
+	int *markp;
 
-	lp = linebuf;
-	bp = getblock(tl, READ);
-	nl = nleft;
-	tl &= ~0377;
-	while (*lp++ = *bp++)
-		if (--nl == 0) {
-			bp = getblock(tl+=0400, READ);
-			nl = nleft;
-		}
-	return(linebuf);
-}
-
-putline()
-{
-	register char *bp, *lp;
-	register nl;
-	int tl;
-
-	fchange = 1;
-	lp = linebuf;
-	tl = tline;
-	bp = getblock(tl, WRITE);
-	nl = nleft;
-	tl &= ~0377;
-	while (*bp = *lp++) {
-		if (*bp++ == '\n') {
-			*--bp = 0;
-			linebp = lp;
-			break;
-		}
-		if (--nl == 0) {
-			bp = getblock(tl+=0400, WRITE);
-			nl = nleft;
-		}
-	}
-	nl = tline;
-	tline += (((lp-linebuf)+03)>>1)&077776;
-	return(nl);
-}
-
-char *
-getblock(atl, iof)
-{
-	extern read(), write();
-	register bno, off;
-	register char *p1, *p2;
-	register int n;
-	
-	bno = (atl>>8)&0377;
-	off = (atl<<1)&0774;
-	if (bno >= 255) {
-		lastc = '\n';
-		error(T);
-	}
-	nleft = 512 - off;
-	if (bno==iblock) {
-		ichanged |= iof;
-		return(ibuff+off);
-	}
-	if (bno==oblock)
-		return(obuff+off);
-	if (iof==READ) {
-		if (ichanged) {
-			blkio(iblock, ibuff, write);
-		}
-		ichanged = 0;
-		iblock = bno;
-		blkio(bno, ibuff, read);
-		return(ibuff+off);
-	}
-	if (oblock>=0) {
-			blkio(oblock, obuff, write);
-	}
-	oblock = bno;
-	return(obuff+off);
-}
-
-blkio(b, buf, iofcn)
-char *buf;
-int (*iofcn)();
-{
-	lseek(tfile, (long)b<<9, 0);
-	if ((*iofcn)(tfile, buf, 512) != 512) {
-		error(T);
-	}
-}
-
-init()
-{
-	register *markp;
-
-	close(tfile);
 	tline = 2;
 	for (markp = names; markp < &names[26]; )
 		*markp++ = 0;
@@ -926,287 +675,14 @@ init()
 	iblock = -1;
 	oblock = -1;
 	ichanged = 0;
-	close(creat(tfname, 0600));
-	tfile = open(tfname, 2);
 	dot = dol = zero;
 }
 
-global(k)
+void
+compile(int aeof)
 {
-	register char *gp;
-	register c;
-	register int *a1;
-	char globuf[GBSIZE];
-
-	if (globp)
-		error(Q);
-	setall();
-	nonzero();
-	if ((c=getchr())=='\n')
-		error(Q);
-	compile(c);
-	gp = globuf;
-	while ((c = getchr()) != '\n') {
-		if (c==EOF)
-			error(Q);
-		if (c=='\\') {
-			c = getchr();
-			if (c!='\n')
-				*gp++ = '\\';
-		}
-		*gp++ = c;
-		if (gp >= &globuf[GBSIZE-2])
-			error(Q);
-	}
-	*gp++ = '\n';
-	*gp++ = 0;
-	for (a1=zero; a1<=dol; a1++) {
-		*a1 &= ~01;
-		if (a1>=addr1 && a1<=addr2 && execute(0, a1)==k)
-			*a1 |= 01;
-	}
-	/*
-	 * Special case: g/.../d (avoid n^2 algorithm)
-	 */
-	if (globuf[0]=='d' && globuf[1]=='\n' && globuf[2]=='\0') {
-		gdelete();
-		return;
-	}
-	for (a1=zero; a1<=dol; a1++) {
-		if (*a1 & 01) {
-			*a1 &= ~01;
-			dot = a1;
-			globp = globuf;
-			commands();
-			a1 = zero;
-		}
-	}
-}
-
-join()
-{
-	register char *gp, *lp;
-	register *a1;
-
-	gp = genbuf;
-	for (a1=addr1; a1<=addr2; a1++) {
-		lp = getline(*a1);
-		while (*gp = *lp++)
-			if (gp++ >= &genbuf[LBSIZE-2])
-				error(Q);
-	}
-	lp = linebuf;
-	gp = genbuf;
-	while (*lp++ = *gp++)
-		;
-	*addr1 = putline();
-	if (addr1<addr2)
-		rdelete(addr1+1, addr2);
-	dot = addr1;
-}
-
-substitute(inglob)
-{
-	register *markp, *a1, nl;
-	int gsubf;
-	int getsub();
-
-	gsubf = compsub();
-	for (a1 = addr1; a1 <= addr2; a1++) {
-		int *ozero;
-		if (execute(0, a1)==0)
-			continue;
-		inglob |= 01;
-		dosub();
-		if (gsubf) {
-			while (*loc2) {
-				if (execute(1, (int *)0)==0)
-					break;
-				dosub();
-			}
-		}
-		subnewa = putline();
-		*a1 &= ~01;
-		if (anymarks) {
-			for (markp = names; markp < &names[26]; markp++)
-				if (*markp == *a1)
-					*markp = subnewa;
-		}
-		subolda = *a1;
-		*a1 = subnewa;
-		ozero = zero;
-		nl = append(getsub, a1);
-		nl += zero-ozero;
-		a1 += nl;
-		addr2 += nl;
-	}
-	if (inglob==0)
-		error(Q);
-}
-
-compsub()
-{
-	register seof, c;
-	register char *p;
-
-	if ((seof = getchr()) == '\n' || seof == ' ')
-		error(Q);
-	compile(seof);
-	p = rhsbuf;
-	for (;;) {
-		c = getchr();
-		if (c=='\\')
-			c = getchr() | 0200;
-		if (c=='\n') {
-			if (globp)
-				c |= 0200;
-			else
-				error(Q);
-		}
-		if (c==seof)
-			break;
-		*p++ = c;
-		if (p >= &rhsbuf[LBSIZE/2])
-			error(Q);
-	}
-	*p++ = 0;
-	if ((peekc = getchr()) == 'g') {
-		peekc = 0;
-		newline();
-		return(1);
-	}
-	newline();
-	return(0);
-}
-
-getsub()
-{
-	register char *p1, *p2;
-
-	p1 = linebuf;
-	if ((p2 = linebp) == 0)
-		return(EOF);
-	while (*p1++ = *p2++)
-		;
-	linebp = 0;
-	return(0);
-}
-
-dosub()
-{
-	register char *lp, *sp, *rp;
-	int c;
-
-	lp = linebuf;
-	sp = genbuf;
-	rp = rhsbuf;
-	while (lp < loc1)
-		*sp++ = *lp++;
-	while (c = *rp++&0377) {
-		if (c=='&') {
-			sp = place(sp, loc1, loc2);
-			continue;
-		} else if (c&0200 && (c &= 0177) >='1' && c < nbra+'1') {
-			sp = place(sp, braslist[c-'1'], braelist[c-'1']);
-			continue;
-		}
-		*sp++ = c&0177;
-		if (sp >= &genbuf[LBSIZE])
-			error(Q);
-	}
-	lp = loc2;
-	loc2 = sp - genbuf + linebuf;
-	while (*sp++ = *lp++)
-		if (sp >= &genbuf[LBSIZE])
-			error(Q);
-	lp = linebuf;
-	sp = genbuf;
-	while (*lp++ = *sp++)
-		;
-}
-
-char *
-place(sp, l1, l2)
-register char *sp, *l1, *l2;
-{
-
-	while (l1 < l2) {
-		*sp++ = *l1++;
-		if (sp >= &genbuf[LBSIZE])
-			error(Q);
-	}
-	return(sp);
-}
-
-move(cflag)
-{
-	register int *adt, *ad1, *ad2;
-	int getcopy();
-
-	setdot();
-	nonzero();
-	if ((adt = address())==0)
-		error(Q);
-	newline();
-	if (cflag) {
-		int *ozero, delta;
-		ad1 = dol;
-		ozero = zero;
-		append(getcopy, ad1++);
-		ad2 = dol;
-		delta = zero - ozero;
-		ad1 += delta;
-		adt += delta;
-	} else {
-		ad2 = addr2;
-		for (ad1 = addr1; ad1 <= ad2;)
-			*ad1++ &= ~01;
-		ad1 = addr1;
-	}
-	ad2++;
-	if (adt<ad1) {
-		dot = adt + (ad2-ad1);
-		if ((++adt)==ad1)
-			return;
-		reverse(adt, ad1);
-		reverse(ad1, ad2);
-		reverse(adt, ad2);
-	} else if (adt >= ad2) {
-		dot = adt++;
-		reverse(ad1, ad2);
-		reverse(ad2, adt);
-		reverse(ad1, adt);
-	} else
-		error(Q);
-	fchange = 1;
-}
-
-reverse(a1, a2)
-register int *a1, *a2;
-{
-	register int t;
-
-	for (;;) {
-		t = *--a2;
-		if (a2 <= a1)
-			return;
-		*a2 = *a1;
-		*a1++ = t;
-	}
-}
-
-getcopy()
-{
-	if (addr1 > addr2)
-		return(EOF);
-	getline(*addr1++);
-	return(0);
-}
-
-compile(aeof)
-{
-	register eof, c;
-	register char *ep;
+	int eof, c;
+	char *ep;
 	char *lastep;
 	char bracket[NBRA], *bracketp;
 	int cclcnt;
@@ -1332,61 +808,36 @@ compile(aeof)
 	error(Q);
 }
 
-execute(gf, addr)
-int *addr;
+int
+cclass(char *set, char c, int af)
 {
-	register char *p1, *p2, c;
+	int n;
 
-	for (c=0; c<NBRA; c++) {
-		braslist[c] = 0;
-		braelist[c] = 0;
-	}
-	if (gf) {
-		if (circfl)
-			return(0);
-		p1 = linebuf;
-		p2 = genbuf;
-		while (*p1++ = *p2++)
-			;
-		locs = p1 = loc2;
-	} else {
-		if (addr==zero)
-			return(0);
-		p1 = getline(*addr);
-		locs = 0;
-	}
-	p2 = expbuf;
-	if (circfl) {
-		loc1 = p1;
-		return(advance(p1, p2));
-	}
-	/* fast check for first character */
-	if (*p2==CCHR) {
-		c = p2[1];
-		do {
-			if (*p1!=c)
-				continue;
-			if (advance(p1, p2)) {
-				loc1 = p1;
-				return(1);
-			}
-		} while (*p1++);
+	if (c==0)
 		return(0);
-	}
-	/* regular algorithm */
-	do {
-		if (advance(p1, p2)) {
-			loc1 = p1;
+	n = *set++;
+	while (--n)
+		if (*set++ == c)
+			return(af);
+	return(!af);
+}
+
+int
+backref(int i, char *lp)
+{
+	register char *bp;
+
+	bp = braslist[i];
+	while (*bp++ == *lp++)
+		if (bp >= braelist[i])
 			return(1);
-		}
-	} while (*p1++);
 	return(0);
 }
 
-advance(lp, ep)
-register char *ep, *lp;
+int
+advance(char *lp, char *ep)
 {
-	register char *curlp;
+	char *curlp;
 	int i;
 
 	for (;;) switch (*ep++) {
@@ -1490,96 +941,687 @@ register char *ep, *lp;
 	}
 }
 
-backref(i, lp)
-register i;
-register char *lp;
+int
+execute(int gf, int *addr)
 {
-	register char *bp;
+	register char *p1, *p2, c;
 
-	bp = braslist[i];
-	while (*bp++ == *lp++)
-		if (bp >= braelist[i])
+	for (c=0; c<NBRA; c++) {
+		braslist[c] = 0;
+		braelist[c] = 0;
+	}
+	if (gf) {
+		if (circfl)
+			return(0);
+		p1 = linebuf;
+		p2 = genbuf;
+		while (*p1++ = *p2++)
+			;
+		locs = p1 = loc2;
+	} else {
+		if (addr==zero)
+			return(0);
+		p1 = getline(*addr);
+		locs = 0;
+	}
+	p2 = expbuf;
+	if (circfl) {
+		loc1 = p1;
+		return(advance(p1, p2));
+	}
+	/* fast check for first character */
+	if (*p2==CCHR) {
+		c = p2[1];
+		do {
+			if (*p1!=c)
+				continue;
+			if (advance(p1, p2)) {
+				loc1 = p1;
+				return(1);
+			}
+		} while (*p1++);
+		return(0);
+	}
+	/* regular algorithm */
+	do {
+		if (advance(p1, p2)) {
+			loc1 = p1;
 			return(1);
+		}
+	} while (*p1++);
 	return(0);
 }
 
-cclass(set, c, af)
-register char *set, c;
+void
+global(int k)
 {
-	register n;
+	char *gp;
+	int c;
+	int *a1;
+	char globuf[GBSIZE];
 
-	if (c==0)
-		return(0);
-	n = *set++;
-	while (--n)
-		if (*set++ == c)
-			return(af);
-	return(!af);
-}
-
-putd()
-{
-	register r;
-
-	r = count%10;
-	count /= 10;
-	if (count)
-		putd();
-	putchr(r + '0');
-}
-
-puts(sp)
-register char *sp;
-{
-	col = 0;
-	while (*sp)
-		putchr(*sp++);
-	putchr('\n');
-}
-
-char	line[70];
-char	*linp	= line;
-
-putchr(ac)
-{
-	register char *lp;
-	register c;
-
-	lp = linp;
-	c = ac;
-	if (listf) {
-		col++;
-		if (col >= 72) {
-			col = 0;
-			*lp++ = '\\';
-			*lp++ = '\n';
+	if (globp)
+		error(Q);
+	setall();
+	nonzero();
+	if ((c=getchr())=='\n')
+		error(Q);
+	compile(c);
+	gp = globuf;
+	while ((c = getchr()) != '\n') {
+		if (c==EOF)
+			error(Q);
+		if (c=='\\') {
+			c = getchr();
+			if (c!='\n')
+				*gp++ = '\\';
 		}
-		if (c=='\t') {
-			c = '>';
-			goto esc;
-		}
-		if (c=='\b') {
-			c = '<';
-		esc:
-			*lp++ = '-';
-			*lp++ = '\b';
-			*lp++ = c;
-			goto out;
-		}
-		if (c<' ' && c!= '\n') {
-			*lp++ = '\\';
-			*lp++ = (c>>3)+'0';
-			*lp++ = (c&07)+'0';
-			col += 2;
-			goto out;
-		}
+		*gp++ = c;
+		if (gp >= &globuf[GBSIZE-2])
+			error(Q);
 	}
-	*lp++ = c;
-out:
-	if(c == '\n' || lp >= &line[64]) {
-		linp = line;
-		write(1, line, lp-line);
+	*gp++ = '\n';
+	*gp++ = 0;
+	for (a1=zero; a1<=dol; a1++) {
+		*a1 &= ~01;
+		if (a1>=addr1 && a1<=addr2 && execute(0, a1)==k)
+			*a1 |= 01;
+	}
+	/*
+	 * Special case: g/.../d (avoid n^2 algorithm)
+	 */
+	if (globuf[0]=='d' && globuf[1]=='\n' && globuf[2]=='\0') {
+		gdelete();
 		return;
 	}
-	linp = lp;
+	for (a1=zero; a1<=dol; a1++) {
+		if (*a1 & 01) {
+			*a1 &= ~01;
+			dot = a1;
+			globp = globuf;
+			commands();
+			a1 = zero;
+		}
+	}
+}
+
+void
+join(void)
+{
+	char *gp, *lp;
+	int *a1;
+
+	gp = genbuf;
+	for (a1=addr1; a1<=addr2; a1++) {
+		lp = getline(*a1);
+		while (*gp = *lp++)
+			if (gp++ >= &genbuf[LBSIZE-2])
+				error(Q);
+	}
+	lp = linebuf;
+	gp = genbuf;
+	while (*lp++ = *gp++)
+		;
+	*addr1 = putline();
+	if (addr1<addr2)
+		rdelete(addr1+1, addr2);
+	dot = addr1;
+}
+
+int
+compsub(void)
+{
+	int seof, c;
+	char *p;
+
+	if ((seof = getchr()) == '\n' || seof == ' ')
+		error(Q);
+	compile(seof);
+	p = rhsbuf;
+	for (;;) {
+		c = getchr();
+		if (c=='\\')
+			c = getchr() | 0200;
+		if (c=='\n') {
+			if (globp)
+				c |= 0200;
+			else
+				error(Q);
+		}
+		if (c==seof)
+			break;
+		*p++ = c;
+		if (p >= &rhsbuf[LBSIZE/2])
+			error(Q);
+	}
+	*p++ = 0;
+	if ((peekc = getchr()) == 'g') {
+		peekc = 0;
+		newline();
+		return(1);
+	}
+	newline();
+	return(0);
+}
+
+int
+getsub(void)
+{
+	char *p1, *p2;
+
+	p1 = linebuf;
+	if ((p2 = linebp) == 0)
+		return(EOF);
+	while (*p1++ = *p2++)
+		;
+	linebp = 0;
+	return(0);
+}
+
+void
+dosub(void)
+{
+	char *lp, *sp, *rp;
+	int c;
+
+	lp = linebuf;
+	sp = genbuf;
+	rp = rhsbuf;
+	while (lp < loc1)
+		*sp++ = *lp++;
+	while (c = *rp++&0377) {
+		if (c=='&') {
+			sp = place(sp, loc1, loc2);
+			continue;
+		} else if (c&0200 && (c &= 0177) >='1' && c < nbra+'1') {
+			sp = place(sp, braslist[c-'1'], braelist[c-'1']);
+			continue;
+		}
+		*sp++ = c&0177;
+		if (sp >= &genbuf[LBSIZE])
+			error(Q);
+	}
+	lp = loc2;
+	loc2 = sp - genbuf + linebuf;
+	while (*sp++ = *lp++)
+		if (sp >= &genbuf[LBSIZE])
+			error(Q);
+	lp = linebuf;
+	sp = genbuf;
+	while (*lp++ = *sp++)
+		;
+}
+
+void
+substitute(int inglob)
+{
+	int *markp, *a1, nl;
+	int gsubf;
+	int getsub();
+
+	gsubf = compsub();
+	for (a1 = addr1; a1 <= addr2; a1++) {
+		int *ozero;
+		if (execute(0, a1)==0)
+			continue;
+		inglob |= 01;
+		dosub();
+		if (gsubf) {
+			while (*loc2) {
+				if (execute(1, (int *)0)==0)
+					break;
+				dosub();
+			}
+		}
+		subnewa = putline();
+		*a1 &= ~01;
+		if (anymarks) {
+			for (markp = names; markp < &names[26]; markp++)
+				if (*markp == *a1)
+					*markp = subnewa;
+		}
+		subolda = *a1;
+		*a1 = subnewa;
+		ozero = zero;
+		nl = append(getsub, a1);
+		nl += zero-ozero;
+		a1 += nl;
+		addr2 += nl;
+	}
+	if (inglob==0)
+		error(Q);
+}
+
+char *
+place(char *sp, char *l1, char *l2)
+{
+
+	while (l1 < l2) {
+		*sp++ = *l1++;
+		if (sp >= &genbuf[LBSIZE])
+			error(Q);
+	}
+	return(sp);
+}
+
+void
+reverse(int *a1, int *a2)
+{
+	register int t;
+
+	for (;;) {
+		t = *--a2;
+		if (a2 <= a1)
+			return;
+		*a2 = *a1;
+		*a1++ = t;
+	}
+}
+
+void
+move(int cflag)
+{
+	register int *adt, *ad1, *ad2;
+	int getcopy();
+
+	setdot();
+	nonzero();
+	if ((adt = address())==0)
+		error(Q);
+	newline();
+	if (cflag) {
+		int *ozero, delta;
+		ad1 = dol;
+		ozero = zero;
+		append(getcopy, ad1++);
+		ad2 = dol;
+		delta = zero - ozero;
+		ad1 += delta;
+		adt += delta;
+	} else {
+		ad2 = addr2;
+		for (ad1 = addr1; ad1 <= ad2;)
+			*ad1++ &= ~01;
+		ad1 = addr1;
+	}
+	ad2++;
+	if (adt<ad1) {
+		dot = adt + (ad2-ad1);
+		if ((++adt)==ad1)
+			return;
+		reverse(adt, ad1);
+		reverse(ad1, ad2);
+		reverse(adt, ad2);
+	} else if (adt >= ad2) {
+		dot = adt++;
+		reverse(ad1, ad2);
+		reverse(ad2, adt);
+		reverse(ad1, adt);
+	} else
+		error(Q);
+	fchange = 1;
+}
+
+int
+getcopy(void)
+{
+	if (addr1 > addr2)
+		return(EOF);
+	getline(*addr1++);
+	return(0);
+}
+
+int *
+address(void)
+{
+	int *a1, minus, c;
+	int n, relerr;
+
+	minus = 0;
+	a1 = 0;
+	for (;;) {
+		c = getchr();
+		if ('0'<=c && c<='9') {
+			n = 0;
+			do {
+				n *= 10;
+				n += c - '0';
+			} while ((c = getchr())>='0' && c<='9');
+			peekc = c;
+			if (a1==0)
+				a1 = zero;
+			if (minus<0)
+				n = -n;
+			a1 += n;
+			minus = 0;
+			continue;
+		}
+		relerr = 0;
+		if (a1 || minus)
+			relerr++;
+		switch(c) {
+		case ' ':
+		case '\t':
+			continue;
+
+		case '+':
+			minus++;
+			if (a1==0)
+				a1 = dot;
+			continue;
+
+		case '-':
+		case '^':
+			minus--;
+			if (a1==0)
+				a1 = dot;
+			continue;
+
+		case '?':
+		case '/':
+			compile(c);
+			a1 = dot;
+			for (;;) {
+				if (c=='/') {
+					a1++;
+					if (a1 > dol)
+						a1 = zero;
+				} else {
+					a1--;
+					if (a1 < zero)
+						a1 = dol;
+				}
+				if (execute(0, a1))
+					break;
+				if (a1==dot)
+					error(Q);
+			}
+			break;
+
+		case '$':
+			a1 = dol;
+			break;
+
+		case '.':
+			a1 = dot;
+			break;
+
+		case '\'':
+			if ((c = getchr()) < 'a' || c > 'z')
+				error(Q);
+			for (a1=zero; a1<=dol; a1++)
+				if (names[c-'a'] == (*a1 & ~01))
+					break;
+			break;
+
+		default:
+			peekc = c;
+			if (a1==0)
+				return(0);
+			a1 += minus;
+			if (a1<zero || a1>dol)
+				error(Q);
+			return(a1);
+		}
+		if (relerr)
+			error(Q);
+	}
+}
+
+void
+commands(void)
+{
+	/*int getfile(), gettty();*/
+	int *a1, c;
+
+	for (;;) {
+	if (pflag) {
+		pflag = 0;
+		addr1 = addr2 = dot;
+		goto print;
+	}
+	addr1 = 0;
+	addr2 = 0;
+	do {
+		addr1 = addr2;
+		if ((a1 = address())==0) {
+			c = getchr();
+			break;
+		}
+		addr2 = a1;
+		if ((c=getchr()) == ';') {
+			c = ',';
+			dot = a1;
+		}
+	} while (c==',');
+	if (addr1==0)
+		addr1 = addr2;
+	switch(c) {
+
+	case 'a':
+		setdot();
+		newline();
+		append(gettty, addr2);
+		continue;
+
+	case 'c':
+		delete();
+		append(gettty, addr1-1);
+		continue;
+
+	case 'd':
+		delete();
+		continue;
+
+	case 'E':
+		fchange = 0;
+		c = 'e';
+	case 'e':
+		setnoaddr();
+		if (vflag && fchange) {
+			fchange = 0;
+			error(Q);
+		}
+		filename(c);
+		init();
+		addr2 = zero;
+		goto caseread;
+
+	case 'f':
+		setnoaddr();
+		filename(c);
+		edputs(savedfile);
+		continue;
+
+	case 'g':
+		global(1);
+		continue;
+
+	case 'i':
+		setdot();
+		nonzero();
+		newline();
+		append(gettty, addr2-1);
+		continue;
+
+
+	case 'j':
+		if (addr2==0) {
+			addr1 = dot;
+			addr2 = dot+1;
+		}
+		setdot();
+		newline();
+		nonzero();
+		join();
+		continue;
+
+	case 'k':
+		if ((c = getchr()) < 'a' || c > 'z')
+			error(Q);
+		newline();
+		setdot();
+		nonzero();
+		names[c-'a'] = *addr2 & ~01;
+		anymarks |= 01;
+		continue;
+
+	case 'm':
+		move(0);
+		continue;
+
+	case '\n':
+		if (addr2==0)
+			addr2 = dot+1;
+		addr1 = addr2;
+		goto print;
+
+	case 'l':
+		listf++;
+	case 'p':
+	case 'P':
+		newline();
+	print:
+		setdot();
+		nonzero();
+		a1 = addr1;
+		do {
+			edputs(getline(*a1++));
+		} while (a1 <= addr2);
+		dot = addr2;
+		listf = 0;
+		continue;
+
+	case 'Q':
+		fchange = 0;
+	case 'q':
+		setnoaddr();
+		newline();
+		quit();
+
+	case 'r':
+		filename(c);
+	caseread:
+		if ((io = open(file, 0)) < 0) {
+			lastc = '\n';
+			error(file);
+		}
+		setall();
+		ninbuf = 0;
+		c = zero != dol;
+		append(getfile, addr2);
+		exfile();
+		fchange = c;
+		continue;
+
+	case 's':
+		setdot();
+		nonzero();
+		substitute(globp!=0);
+		continue;
+
+	case 't':
+		move(1);
+		continue;
+
+	case 'u':
+		setdot();
+		nonzero();
+		newline();
+		if ((*addr2&~01) != subnewa)
+			error(Q);
+		*addr2 = subolda;
+		dot = addr2;
+		continue;
+
+	case 'v':
+		global(0);
+		continue;
+
+	case 'W':
+		wrapp++;
+	case 'w':
+		setall();
+		nonzero();
+		filename(c);
+		if(!wrapp ||
+		  ((io = open(file,1)) == -1) ||
+		  ((lseek(io, 0L, 2)) == -1))
+			if ((io = creat(file, 0666)) < 0)
+				error(file);
+		wrapp = 0;
+		putfile();
+		exfile();
+		if (addr1==zero+1 && addr2==dol)
+			fchange = 0;
+		continue;
+
+
+
+	case '=':
+		setall();
+		newline();
+		count = (addr2-zero)&077777;
+		putd();
+		putchr('\n');
+		continue;
+
+	case '!':
+		callunix();
+		continue;
+
+	case EOF:
+		return;
+
+	}
+	error(Q);
+	}
+}
+
+int
+main(int argc, char **argv)
+{
+	char *p1, *p2;
+	void (*oldintr)(int);
+
+	oldquit = signal(SIGQUIT, SIG_IGN);
+	oldhup = signal(SIGHUP, SIG_IGN);
+	oldintr = signal(SIGINT, SIG_IGN);
+	if (signal(SIGTERM, SIG_IGN) == SIG_DFL)
+		signal(SIGTERM, shquit);
+	argv++;
+	while (argc > 1 && **argv=='-') {
+		switch((*argv)[1]) {
+
+		case '\0':
+			vflag = 0;
+			break;
+
+		case 'q':
+			signal(SIGQUIT, SIG_DFL);
+			vflag = 1;
+			break;
+
+		}
+		argv++;
+		argc--;
+	}
+
+	if (argc>1) {
+		p1 = *argv;
+		p2 = savedfile;
+		while (*p2++ = *p1++)
+			;
+		globp = "r";
+	}
+	zero = (int *)malloc(nlall*sizeof(int));
+	tfile = mkstemp(tfname);
+	init();
+	if (oldintr == SIG_DFL)
+		signal(SIGINT, onintr);
+	if (oldhup == SIG_DFL)
+		signal(SIGHUP, onhup);
+	setjmp(savej);
+	commands();
+	quit();
 }
