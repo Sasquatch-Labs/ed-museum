@@ -121,7 +121,7 @@ getchr(void)
 	}
 	if (read(0, &c, 1) <= 0)
 		return(lastc = EOF);
-	lastc = c&0177;
+	lastc = c;
 	return(lastc);
 }
 
@@ -459,7 +459,7 @@ gettty(void)
 				peekc = c;
 			return(c);
 		}
-		if ((c &= 0177) == 0)
+		if ((c &= 0377) == 0)
 			continue;
 		*p++ = c;
 		if (p >= &linebuf[LBSIZE-2])
@@ -484,17 +484,12 @@ getfile(void)
 			if ((ninbuf = read(io, genbuf, LBSIZE)-1) < 0)
 				return(EOF);
 			fp = genbuf;
-			while(fp < &genbuf[ninbuf]) {
-				if (*fp++ & 0200) {
-					break;
-				}
-			}
 			fp = genbuf;
 		}
 		c = *fp++;
 		if (c=='\0')
 			continue;
-		if (c&0200 || lp >= &linebuf[LBSIZE]) {
+		if (lp >= &linebuf[LBSIZE]) {
 			lastc = '\n';
 			error(Q);
 		}
@@ -1137,7 +1132,7 @@ dosub(void)
 			sp = place(sp, braslist[c-'1'], braelist[c-'1']);
 			continue;
 		}
-		*sp++ = c&0177;
+		*sp++ = c;
 		if (sp >= &genbuf[LBSIZE])
 			error(Q);
 	}
