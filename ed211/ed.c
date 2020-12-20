@@ -17,11 +17,11 @@ static char sccsid[] = "@(#)ed.c	4.5.1.1 (Berkeley) 8/12/86";
 #include <fcntl.h>
 #undef CEOF
 #include <setjmp.h>
-#define	FNSIZE	64
+#define	FNSIZE	1024
 #define	LBSIZE	512
-#define	ESIZE	128
+#define	ESIZE	1024
 #define	GBSIZE	256
-#define	NBRA	5
+#define	NBRA	9
 #define	EOF	-1
 
 #define	CBRA	1
@@ -1128,8 +1128,9 @@ dosub(void)
 		if (c=='&') {
 			sp = place(sp, loc1, loc2);
 			continue;
-		} else if (c&0200 && (c &= 0177) >='1' && c < nbra+'1') {
-			sp = place(sp, braslist[c-'1'], braelist[c-'1']);
+		} else if (c&0200 && (c & 0177) >='1' && (c & 0177) < nbra+'1') {
+			/* XXX: This is going to trip on any UTF-8 character that includes 0xb0-0xb9 */
+			sp = place(sp, braslist[(c&0177)-'1'], braelist[(c&0177)-'1']);
 			continue;
 		}
 		*sp++ = c;
