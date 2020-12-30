@@ -1075,11 +1075,16 @@ compsub(void)
 	p = rhsbuf;
 	for (;;) {
 		c = getchr();
-		if (c=='\\')
-			c = getchr() | 0200;
+		if (c=='\\') {
+			c = getchr();
+			if (c >= '1' && c < NBRA + '1')
+				c = 0365 + (c - '1');
+			else
+				error(Q);
+		}
 		if (c=='\n') {
 			if (globp)
-				c |= 0200;
+				c = 0376;
 			else
 				error(Q);
 		}
@@ -1128,11 +1133,12 @@ dosub(void)
 		if (c=='&') {
 			sp = place(sp, loc1, loc2);
 			continue;
-		} else if (c&0200 && (c & 0177) >='1' && (c & 0177) < nbra+'1') {
-			/* XXX: This is going to trip on any UTF-8 character that includes 0xb0-0xb9 */
-			sp = place(sp, braslist[(c&0177)-'1'], braelist[(c&0177)-'1']);
+		} else if (c >= 0365 && c < nbra+0365) {
+			/* This uses the UTF-8 forbidden bytes for backreferencing */
+			sp = place(sp, braslist[c - 0365], braelist[c - 0365]);
 			continue;
-		}
+		} else if (c == 0376)
+			c = '\n';
 		*sp++ = c;
 		if (sp >= &genbuf[LBSIZE])
 			error(Q);
