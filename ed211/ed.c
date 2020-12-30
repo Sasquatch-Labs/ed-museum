@@ -573,14 +573,15 @@ void
 callunix(void)
 {
 	void (*savint)(int);
-    int pid, rpid;
+	int pid, rpid;
 	int retcode;
 
 	setnoaddr();
 	if ((pid = fork()) == 0) {
 		signal(SIGHUP, oldhup);
 		signal(SIGQUIT, oldquit);
-		execl("/bin/sh", "sh", "-t", 0);
+		gettty();
+		execl("/bin/sh", "sh", "-c", linebuf, 0);
 		exit(0100);
 	}
 	savint = signal(SIGINT, SIG_IGN);

@@ -163,7 +163,7 @@ blkio(int b, char *buf, ssize_t (*iofcn)(int, void *, size_t))
 ssize_t
 edwrite(int fd, void *buf, size_t n)
 {
-    return write(fd, buf, n);
+	return write(fd, buf, n);
 }
 
 char *
@@ -515,7 +515,8 @@ unix(void)
 	if ((pid = fork()) == 0) {
 		signal(SIGHUP, onhup);
 		signal(SIGQUIT, onquit);
-		execl("/bin/sh", "sh", "-t", 0);
+		gettty();
+		execl("/bin/sh", "sh", "-c", linebuf, 0);
 		exit(0);
 	}
 	savint = signal(SIGINT, SIG_DFL);
